@@ -19,7 +19,10 @@ import (
 )
 
 type ResourceTrustsModule struct {
-	KMSClient sdk.KMSClientInterface
+	KMSClient        *sdk.KMSClientInterface
+	APIGatewayClient *sdk.APIGatewayClientInterface
+	EC2Client        *sdk.AWSEC2ClientInterface
+	OpenSearchClient *sdk.OpenSearchClientInterface
 
 	// General configuration data
 	Caller             sts.GetCallerIdentityOutput
@@ -76,11 +79,11 @@ func (m *ResourceTrustsModule) PrintResources(outputDirectory string, verbosity 
 	fmt.Printf("[%s][%s] Enumerating Resources with resource policies for account %s.\n", cyan(m.output.CallingModule), cyan(m.AWSProfileStub), aws.ToString(m.Caller.Account))
 	// if kms feature flag is enabled include kms in the supported services
 	if includeKms {
-		fmt.Printf("[%s][%s] Supported Services: CodeBuild, ECR, EFS, Glue, KMS, Lambda, SecretsManager, S3, SNS, SQS\n",
+		fmt.Printf("[%s][%s] Supported Services: APIGateway, CodeBuild, ECR, EFS, Glue, KMS, Lambda, Opensearch, SecretsManager, S3, SNS, SQS, VpcEndpoint\n",
 			cyan(m.output.CallingModule), cyan(m.AWSProfileStub))
 	} else {
-		fmt.Printf("[%s][%s] Supported Services: CodeBuild, ECR, EFS, Glue, Lambda, SecretsManager, S3, SNS, "+
-			"SQS (KMS requires --include-kms feature flag)\n",
+		fmt.Printf("[%s][%s] Supported Services: APIGateway, CodeBuild, ECR, EFS, Glue, Lambda, Opensearch, SecretsManager, S3, SNS, "+
+			"SQS (KMS requires --include-kms feature flag), VpcEndpoint\n",
 			cyan(m.output.CallingModule), cyan(m.AWSProfileStub))
 	}
 	wg := new(sync.WaitGroup)
@@ -196,7 +199,6 @@ func (m *ResourceTrustsModule) PrintResources(outputDirectory string, verbosity 
 		fmt.Printf("[%s][%s] No resource policies found, skipping the creation of an output file.\n", cyan(m.output.CallingModule), cyan(m.AWSProfileStub))
 	}
 	fmt.Printf("[%s][%s] For context and next steps: https://github.com/BishopFox/cloudfox/wiki/AWS-Commands#%s\n", cyan(m.output.CallingModule), cyan(m.AWSProfileStub), m.output.CallingModule)
-
 }
 
 func (m *ResourceTrustsModule) executeChecks(r string, wg *sync.WaitGroup, semaphore chan struct{}, dataReceiver chan Resource2, includeKms bool) {
@@ -244,6 +246,7 @@ func (m *ResourceTrustsModule) executeChecks(r string, wg *sync.WaitGroup, semap
 		wg.Add(1)
 		m.getCodeBuildResourcePoliciesPerRegion(r, wg, semaphore, dataReceiver)
 	}
+
 	res, err = servicemap.IsServiceInRegion("lambda", r)
 	if err != nil {
 		m.modLog.Error(err)
@@ -253,6 +256,7 @@ func (m *ResourceTrustsModule) executeChecks(r string, wg *sync.WaitGroup, semap
 		wg.Add(1)
 		m.getLambdaPolicyPerRegion(r, wg, semaphore, dataReceiver)
 	}
+
 	res, err = servicemap.IsServiceInRegion("efs", r)
 	if err != nil {
 		m.modLog.Error(err)
@@ -262,6 +266,7 @@ func (m *ResourceTrustsModule) executeChecks(r string, wg *sync.WaitGroup, semap
 		wg.Add(1)
 		m.getEFSfilesystemPoliciesPerRegion(r, wg, semaphore, dataReceiver)
 	}
+
 	res, err = servicemap.IsServiceInRegion("secretsmanager", r)
 	if err != nil {
 		m.modLog.Error(err)
@@ -271,6 +276,7 @@ func (m *ResourceTrustsModule) executeChecks(r string, wg *sync.WaitGroup, semap
 		wg.Add(1)
 		m.getSecretsManagerSecretsPoliciesPerRegion(r, wg, semaphore, dataReceiver)
 	}
+
 	res, err = servicemap.IsServiceInRegion("glue", r)
 	if err != nil {
 		m.modLog.Error(err)
@@ -281,7 +287,7 @@ func (m *ResourceTrustsModule) executeChecks(r string, wg *sync.WaitGroup, semap
 		m.getGlueResourcePoliciesPerRegion(r, wg, semaphore, dataReceiver)
 	}
 
-	if includeKms {
+	if includeKms && m.KMSClient != nil {
 		res, err = servicemap.IsServiceInRegion("kms", r)
 		if err != nil {
 			m.modLog.Error(err)
@@ -293,6 +299,41 @@ func (m *ResourceTrustsModule) executeChecks(r string, wg *sync.WaitGroup, semap
 		}
 	}
 
+	if m.APIGatewayClient != nil {
+		res, err = servicemap.IsServiceInRegion("apigateway", r)
+		if err != nil {
+			m.modLog.Error(err)
+		}
+		if res {
+			m.CommandCounter.Total++
+			wg.Add(1)
+			m.getAPIGatewayPoliciesPerRegion(r, wg, semaphore, dataReceiver)
+		}
+	}
+
+	if m.EC2Client != nil {
+		res, err = servicemap.IsServiceInRegion("ec2", r)
+		if err != nil {
+			m.modLog.Error(err)
+		}
+		if res {
+			m.CommandCounter.Total++
+			wg.Add(1)
+			m.getVPCEndpointPoliciesPerRegion(r, wg, semaphore, dataReceiver)
+		}
+	}
+
+	if m.OpenSearchClient != nil {
+		res, err = servicemap.IsServiceInRegion("es", r)
+		if err != nil {
+			m.modLog.Error(err)
+		}
+		if res {
+			m.CommandCounter.Total++
+			wg.Add(1)
+			m.getOpenSearchPoliciesPerRegion(r, wg, semaphore, dataReceiver)
+		}
+	}
 }
 
 func (m *ResourceTrustsModule) Receiver(receiver chan Resource2, receiverDone chan bool) {
@@ -328,7 +369,7 @@ func (m *ResourceTrustsModule) getSNSTopicsPerRegion(r string, wg *sync.WaitGrou
 
 	for _, t := range ListTopics {
 		var statementSummaryInEnglish string
-		var isInteresting string = "No"
+		var isInteresting = "No"
 		topic, err := cloudFoxSNSClient.getTopicWithAttributes(aws.ToString(t.TopicArn), r)
 		if err != nil {
 			m.modLog.Error(err.Error())
@@ -338,9 +379,10 @@ func (m *ResourceTrustsModule) getSNSTopicsPerRegion(r string, wg *sync.WaitGrou
 		parsedArn, err := arn.Parse(aws.ToString(t.TopicArn))
 		if err != nil {
 			topic.Name = aws.ToString(t.TopicArn)
+		} else {
+			topic.Name = parsedArn.Resource
+			topic.Region = parsedArn.Region
 		}
-		topic.Name = parsedArn.Resource
-		topic.Region = parsedArn.Region
 
 		// check if topic is public or not
 		if topic.Policy.IsPublic() {
@@ -881,7 +923,7 @@ func (m *ResourceTrustsModule) getKMSPoliciesPerRegion(r string, wg *sync.WaitGr
 	semaphore <- struct{}{}
 	defer func() { <-semaphore }()
 
-	listKeys, err := sdk.CachedKMSListKeys(m.KMSClient, aws.ToString(m.Caller.Account), r)
+	listKeys, err := sdk.CachedKMSListKeys(*m.KMSClient, aws.ToString(m.Caller.Account), r)
 	if err != nil {
 		sharedLogger.Error(err.Error())
 		return
@@ -892,7 +934,7 @@ func (m *ResourceTrustsModule) getKMSPoliciesPerRegion(r string, wg *sync.WaitGr
 		var statementSummaryInEnglish string
 		var isInteresting = "No"
 
-		keyPolicy, err := sdk.CachedKMSGetKeyPolicy(m.KMSClient, aws.ToString(m.Caller.Account), r, aws.ToString(key.KeyId))
+		keyPolicy, err := sdk.CachedKMSGetKeyPolicy(*m.KMSClient, aws.ToString(m.Caller.Account), r, aws.ToString(key.KeyId))
 		if err != nil {
 			sharedLogger.Error(err.Error())
 			m.CommandCounter.Error++
@@ -931,6 +973,249 @@ func (m *ResourceTrustsModule) getKMSPoliciesPerRegion(r string, wg *sync.WaitGr
 					Region:                r,
 					Interesting:           isInteresting,
 				}
+			}
+		}
+	}
+}
+
+func (m *ResourceTrustsModule) getAPIGatewayPoliciesPerRegion(r string, wg *sync.WaitGroup, semaphore chan struct{}, dataReceiver chan Resource2) {
+	defer func() {
+		m.CommandCounter.Executing--
+		m.CommandCounter.Complete++
+		wg.Done()
+	}()
+	semaphore <- struct{}{}
+	defer func() { <-semaphore }()
+
+	restAPIs, err := sdk.CachedApiGatewayGetRestAPIs(*m.APIGatewayClient, aws.ToString(m.Caller.Account), r)
+	if err != nil {
+		sharedLogger.Error(err.Error())
+		return
+	}
+
+	for _, restAPI := range restAPIs {
+		var isPublic string
+		var statementSummaryInEnglish string
+		var isInteresting = "No"
+
+		if sdk.IsPublicApiGateway(&restAPI) {
+			isPublic = magenta("Yes")
+			isInteresting = magenta("Yes")
+		} else {
+			isPublic = "No"
+		}
+
+		if restAPI.Policy != nil && *restAPI.Policy != "" {
+
+			// remove backslashes from the policy JSON
+			policyJson := strings.ReplaceAll(aws.ToString(restAPI.Policy), `\"`, `"`)
+
+			restAPIPolicy, err := policy.ParseJSONPolicy([]byte(policyJson))
+			if err != nil {
+				sharedLogger.Error(fmt.Errorf("parsing policy (%s) as JSON: %s", aws.ToString(restAPI.Name), err))
+				m.CommandCounter.Error++
+				continue
+			}
+
+			if !restAPIPolicy.IsEmpty() {
+				for i, statement := range restAPIPolicy.Statement {
+					prefix := ""
+					if len(restAPIPolicy.Statement) > 1 {
+						prefix = fmt.Sprintf("Statement %d says: ", i)
+						statementSummaryInEnglish = prefix + statement.GetStatementSummaryInEnglish(*m.Caller.Account) + "\n"
+					} else {
+						statementSummaryInEnglish = statement.GetStatementSummaryInEnglish(*m.Caller.Account)
+					}
+
+					statementSummaryInEnglish = strings.TrimSuffix(statementSummaryInEnglish, "\n")
+					if isResourcePolicyInteresting(statementSummaryInEnglish) {
+						//magenta(statementSummaryInEnglish)
+						isInteresting = magenta("Yes")
+					}
+
+					dataReceiver <- Resource2{
+						AccountID:             aws.ToString(m.Caller.Account),
+						ARN:                   fmt.Sprintf("arn:aws:execute-api:%s:%s:%s/*", r, *m.Caller.Account, *restAPI.Id),
+						ResourcePolicySummary: statementSummaryInEnglish,
+						Public:                isPublic,
+						Name:                  aws.ToString(restAPI.Name),
+						Region:                r,
+						Interesting:           isInteresting,
+					}
+				}
+			}
+		} else {
+			dataReceiver <- Resource2{
+				AccountID:             aws.ToString(m.Caller.Account),
+				ARN:                   fmt.Sprintf("arn:aws:execute-api:%s:%s:%s/*", r, *m.Caller.Account, *restAPI.Id),
+				ResourcePolicySummary: statementSummaryInEnglish,
+				Public:                isPublic,
+				Name:                  aws.ToString(restAPI.Name),
+				Region:                r,
+				Interesting:           isInteresting,
+			}
+		}
+	}
+}
+
+func (m *ResourceTrustsModule) getVPCEndpointPoliciesPerRegion(r string, wg *sync.WaitGroup, semaphore chan struct{}, dataReceiver chan Resource2) {
+	defer func() {
+		m.CommandCounter.Executing--
+		m.CommandCounter.Complete++
+		wg.Done()
+	}()
+	semaphore <- struct{}{}
+	defer func() { <-semaphore }()
+
+	vpcEndpoints, err := sdk.CachedEC2DescribeVpcEndpoints(*m.EC2Client, aws.ToString(m.Caller.Account), r)
+	if err != nil {
+		sharedLogger.Error(err.Error())
+		return
+	}
+
+	for _, vpcEndpoint := range vpcEndpoints {
+		var isPublic = "No"
+		var statementSummaryInEnglish string
+		var isInteresting = "No"
+
+		if vpcEndpoint.PolicyDocument != nil && *vpcEndpoint.PolicyDocument != "" {
+			vpcEndpointPolicyJson := aws.ToString(vpcEndpoint.PolicyDocument)
+			vpcEndpointPolicy, err := policy.ParseJSONPolicy([]byte(vpcEndpointPolicyJson))
+			if err != nil {
+				sharedLogger.Error(fmt.Errorf("parsing policy (%s) as JSON: %s", aws.ToString(vpcEndpoint.VpcEndpointId), err))
+				m.CommandCounter.Error++
+				continue
+			}
+
+			if !vpcEndpointPolicy.IsEmpty() {
+				for i, statement := range vpcEndpointPolicy.Statement {
+					prefix := ""
+					if len(vpcEndpointPolicy.Statement) > 1 {
+						prefix = fmt.Sprintf("Statement %d says: ", i)
+						statementSummaryInEnglish = prefix + statement.GetStatementSummaryInEnglish(*m.Caller.Account) + "\n"
+					} else {
+						statementSummaryInEnglish = statement.GetStatementSummaryInEnglish(*m.Caller.Account)
+					}
+
+					statementSummaryInEnglish = strings.TrimSuffix(statementSummaryInEnglish, "\n")
+					if isResourcePolicyInteresting(statementSummaryInEnglish) {
+						//magenta(statementSummaryInEnglish)
+						isInteresting = magenta("Yes")
+					}
+
+					dataReceiver <- Resource2{
+						AccountID:             aws.ToString(m.Caller.Account),
+						ARN:                   aws.ToString(vpcEndpoint.VpcEndpointId),
+						ResourcePolicySummary: statementSummaryInEnglish,
+						Public:                isPublic,
+						Name:                  aws.ToString(vpcEndpoint.VpcEndpointId),
+						Region:                r,
+						Interesting:           isInteresting,
+					}
+				}
+			}
+		} else {
+			dataReceiver <- Resource2{
+				AccountID:             aws.ToString(m.Caller.Account),
+				ARN:                   aws.ToString(vpcEndpoint.VpcEndpointId),
+				ResourcePolicySummary: statementSummaryInEnglish,
+				Public:                isPublic,
+				Name:                  aws.ToString(vpcEndpoint.VpcEndpointId),
+				Region:                r,
+				Interesting:           isInteresting,
+			}
+		}
+	}
+}
+
+func (m *ResourceTrustsModule) getOpenSearchPoliciesPerRegion(r string, wg *sync.WaitGroup, semaphore chan struct{}, dataReceiver chan Resource2) {
+	defer func() {
+		m.CommandCounter.Executing--
+		m.CommandCounter.Complete++
+		wg.Done()
+	}()
+	semaphore <- struct{}{}
+	defer func() { <-semaphore }()
+
+	openSearchDomains, err := sdk.CachedOpenSearchListDomainNames(*m.OpenSearchClient, aws.ToString(m.Caller.Account), r)
+	if err != nil {
+		sharedLogger.Error(err.Error())
+		return
+	}
+	for _, openSearchDomain := range openSearchDomains {
+		var isPublic string
+		var statementSummaryInEnglish string
+		var isInteresting = "No"
+
+		openSearchDomainConfig, err := sdk.CachedOpenSearchDescribeDomainConfig(*m.OpenSearchClient, aws.ToString(m.Caller.Account), r, aws.ToString(openSearchDomain.DomainName))
+		if err != nil {
+			sharedLogger.Error(err.Error())
+			m.CommandCounter.Error++
+			continue
+		}
+
+		if aws.ToBool(openSearchDomainConfig.AdvancedSecurityOptions.Options.Enabled) {
+			isPublic = "No"
+		} else {
+			isPublic = magenta("Yes")
+			isInteresting = magenta("Yes")
+		}
+
+		openSearchDomainStatus, err := sdk.CachedOpenSearchDescribeDomain(*m.OpenSearchClient, aws.ToString(m.Caller.Account), r, aws.ToString(openSearchDomain.DomainName))
+		if err != nil {
+			sharedLogger.Error(err.Error())
+			m.CommandCounter.Error++
+			continue
+		}
+
+		if openSearchDomainStatus.AccessPolicies != nil && *openSearchDomainStatus.AccessPolicies != "" {
+
+			// remove backslashes from the policy JSON
+			policyJson := strings.ReplaceAll(aws.ToString(openSearchDomainStatus.AccessPolicies), `\"`, `"`)
+
+			openSearchDomainPolicy, err := policy.ParseJSONPolicy([]byte(policyJson))
+			if err != nil {
+				sharedLogger.Error(fmt.Errorf("parsing policy (%s) as JSON: %s", aws.ToString(openSearchDomainStatus.ARN), err))
+				m.CommandCounter.Error++
+				continue
+			}
+
+			if !openSearchDomainPolicy.IsEmpty() {
+				for i, statement := range openSearchDomainPolicy.Statement {
+					prefix := ""
+					if len(openSearchDomainPolicy.Statement) > 1 {
+						prefix = fmt.Sprintf("Statement %d says: ", i)
+						statementSummaryInEnglish = prefix + statement.GetStatementSummaryInEnglish(*m.Caller.Account) + "\n"
+					} else {
+						statementSummaryInEnglish = statement.GetStatementSummaryInEnglish(*m.Caller.Account)
+					}
+
+					statementSummaryInEnglish = strings.TrimSuffix(statementSummaryInEnglish, "\n")
+					if isResourcePolicyInteresting(statementSummaryInEnglish) {
+						//magenta(statementSummaryInEnglish)
+						isInteresting = magenta("Yes")
+					}
+
+					dataReceiver <- Resource2{
+						AccountID:             aws.ToString(m.Caller.Account),
+						ARN:                   aws.ToString(openSearchDomainStatus.ARN),
+						ResourcePolicySummary: statementSummaryInEnglish,
+						Public:                isPublic,
+						Name:                  aws.ToString(openSearchDomain.DomainName),
+						Region:                r,
+						Interesting:           isInteresting,
+					}
+				}
+			}
+		} else {
+			dataReceiver <- Resource2{
+				AccountID:             aws.ToString(m.Caller.Account),
+				ARN:                   aws.ToString(openSearchDomainStatus.ARN),
+				ResourcePolicySummary: statementSummaryInEnglish,
+				Public:                isPublic,
+				Name:                  aws.ToString(openSearchDomain.DomainName),
+				Region:                r,
+				Interesting:           isInteresting,
 			}
 		}
 	}
@@ -995,7 +1280,7 @@ func (m *ResourceTrustsModule) getGlueResourcePoliciesPerRegion(r string, wg *sy
 }
 
 func isResourcePolicyInteresting(statementSummaryInEnglish string) bool {
-	// check if the statement has any of the following items, but make sure the check is case insensitive
+	// check if the statement has any of the following items, but make sure the check is case-insensitive
 	// if it does, then return true
 	// if it doesn't, then return false
 

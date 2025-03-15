@@ -179,8 +179,8 @@ github.com/aws/aws-sdk-go-v2/service/lightsail v1.40.3 h1:dy4sbyGy7BS4c0KaPZwg1P
 github.com/aws/aws-sdk-go-v2/service/lightsail v1.40.3/go.mod h1:EMgqMhof+RuaYvQavxKC0ZWvP7yB4B4NJhP+dbm13u0=
 github.com/aws/aws-sdk-go-v2/service/mq v1.25.3 h1:SyRcb9GRPcoNKCuLnpj1qGIr/8stnVIf4DsuRhXIzEA=
 github.com/aws/aws-sdk-go-v2/service/mq v1.25.3/go.mod h1:Xu8nT/Yj64z5Gj1ebVB3drPEIBsPNDoFhx2xZDrdGlc=
-github.com/aws/aws-sdk-go-v2/service/opensearch v1.39.2 h1:px8DLC+DOd2fCLnMm6XlyeLU/9B0dXZWzYXzHSKAzZY=
-github.com/aws/aws-sdk-go-v2/service/opensearch v1.39.2/go.mod h1:91AFffUmnw/bumAEE6Sf1yWgW3YdsjexH5c6hePGwSQ=
+github.com/aws/aws-sdk-go-v2/service/opensearch v1.46.1 h1:PJPORR5Y+Vdvz+JzR7P5BA/i+lHpGQOhtpuJyvDdK00=
+github.com/aws/aws-sdk-go-v2/service/opensearch v1.46.1/go.mod h1:51rUy2+lDiOQVlekScV044he709HMMhCdUDHqSBojgg=
 github.com/aws/aws-sdk-go-v2/service/organizations v1.30.2 h1:+tGF0JH2u4HwneqNFAKFHqENwfpBweKj67+LbwTKpqE=
 github.com/aws/aws-sdk-go-v2/service/organizations v1.30.2/go.mod h1:6wxO8s5wMumyNRsOgOgcIvqvF8rIf8Cj7Khhn/bFI0c=
 github.com/aws/aws-sdk-go-v2/service/ram v1.27.3 h1:MoQ0up3IiE2fl0+qySx3Lb0swK6G6ESQ4S3w3WfJZ48=
