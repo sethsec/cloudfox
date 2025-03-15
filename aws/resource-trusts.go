@@ -19,7 +19,8 @@ import (
 )
 
 type ResourceTrustsModule struct {
-	KMSClient sdk.KMSClientInterface
+	KMSClient        *sdk.KMSClientInterface
+	APIGatewayClient *sdk.APIGatewayClientInterface
 
 	// General configuration data
 	Caller             sts.GetCallerIdentityOutput
@@ -76,10 +77,10 @@ func (m *ResourceTrustsModule) PrintResources(outputDirectory string, verbosity 
 	fmt.Printf("[%s][%s] Enumerating Resources with resource policies for account %s.\n", cyan(m.output.CallingModule), cyan(m.AWSProfileStub), aws.ToString(m.Caller.Account))
 	// if kms feature flag is enabled include kms in the supported services
 	if includeKms {
-		fmt.Printf("[%s][%s] Supported Services: CodeBuild, ECR, EFS, Glue, KMS, Lambda, SecretsManager, S3, SNS, SQS\n",
+		fmt.Printf("[%s][%s] Supported Services: APIGateway, CodeBuild, ECR, EFS, Glue, KMS, Lambda, SecretsManager, S3, SNS, SQS\n",
 			cyan(m.output.CallingModule), cyan(m.AWSProfileStub))
 	} else {
-		fmt.Printf("[%s][%s] Supported Services: CodeBuild, ECR, EFS, Glue, Lambda, SecretsManager, S3, SNS, "+
+		fmt.Printf("[%s][%s] Supported Services: APIGateway, CodeBuild, ECR, EFS, Glue, Lambda, SecretsManager, S3, SNS, "+
 			"SQS (KMS requires --include-kms feature flag)\n",
 			cyan(m.output.CallingModule), cyan(m.AWSProfileStub))
 	}
@@ -244,6 +245,7 @@ func (m *ResourceTrustsModule) executeChecks(r string, wg *sync.WaitGroup, semap
 		wg.Add(1)
 		m.getCodeBuildResourcePoliciesPerRegion(r, wg, semaphore, dataReceiver)
 	}
+
 	res, err = servicemap.IsServiceInRegion("lambda", r)
 	if err != nil {
 		m.modLog.Error(err)
@@ -253,6 +255,7 @@ func (m *ResourceTrustsModule) executeChecks(r string, wg *sync.WaitGroup, semap
 		wg.Add(1)
 		m.getLambdaPolicyPerRegion(r, wg, semaphore, dataReceiver)
 	}
+
 	res, err = servicemap.IsServiceInRegion("efs", r)
 	if err != nil {
 		m.modLog.Error(err)
@@ -262,6 +265,7 @@ func (m *ResourceTrustsModule) executeChecks(r string, wg *sync.WaitGroup, semap
 		wg.Add(1)
 		m.getEFSfilesystemPoliciesPerRegion(r, wg, semaphore, dataReceiver)
 	}
+
 	res, err = servicemap.IsServiceInRegion("secretsmanager", r)
 	if err != nil {
 		m.modLog.Error(err)
@@ -271,6 +275,7 @@ func (m *ResourceTrustsModule) executeChecks(r string, wg *sync.WaitGroup, semap
 		wg.Add(1)
 		m.getSecretsManagerSecretsPoliciesPerRegion(r, wg, semaphore, dataReceiver)
 	}
+
 	res, err = servicemap.IsServiceInRegion("glue", r)
 	if err != nil {
 		m.modLog.Error(err)
@@ -281,7 +286,7 @@ func (m *ResourceTrustsModule) executeChecks(r string, wg *sync.WaitGroup, semap
 		m.getGlueResourcePoliciesPerRegion(r, wg, semaphore, dataReceiver)
 	}
 
-	if includeKms {
+	if includeKms && m.KMSClient != nil {
 		res, err = servicemap.IsServiceInRegion("kms", r)
 		if err != nil {
 			m.modLog.Error(err)
@@ -293,6 +298,17 @@ func (m *ResourceTrustsModule) executeChecks(r string, wg *sync.WaitGroup, semap
 		}
 	}
 
+	if m.APIGatewayClient != nil {
+		res, err = servicemap.IsServiceInRegion("apigateway", r)
+		if err != nil {
+			m.modLog.Error(err)
+		}
+		if res {
+			m.CommandCounter.Total++
+			wg.Add(1)
+			m.getAPIGatewayPoliciesPerRegion(r, wg, semaphore, dataReceiver)
+		}
+	}
 }
 
 func (m *ResourceTrustsModule) Receiver(receiver chan Resource2, receiverDone chan bool) {
@@ -881,7 +897,7 @@ func (m *ResourceTrustsModule) getKMSPoliciesPerRegion(r string, wg *sync.WaitGr
 	semaphore <- struct{}{}
 	defer func() { <-semaphore }()
 
-	listKeys, err := sdk.CachedKMSListKeys(m.KMSClient, aws.ToString(m.Caller.Account), r)
+	listKeys, err := sdk.CachedKMSListKeys(*m.KMSClient, aws.ToString(m.Caller.Account), r)
 	if err != nil {
 		sharedLogger.Error(err.Error())
 		return
@@ -892,7 +908,7 @@ func (m *ResourceTrustsModule) getKMSPoliciesPerRegion(r string, wg *sync.WaitGr
 		var statementSummaryInEnglish string
 		var isInteresting = "No"
 
-		keyPolicy, err := sdk.CachedKMSGetKeyPolicy(m.KMSClient, aws.ToString(m.Caller.Account), r, aws.ToString(key.KeyId))
+		keyPolicy, err := sdk.CachedKMSGetKeyPolicy(*m.KMSClient, aws.ToString(m.Caller.Account), r, aws.ToString(key.KeyId))
 		if err != nil {
 			sharedLogger.Error(err.Error())
 			m.CommandCounter.Error++
@@ -931,6 +947,86 @@ func (m *ResourceTrustsModule) getKMSPoliciesPerRegion(r string, wg *sync.WaitGr
 					Region:                r,
 					Interesting:           isInteresting,
 				}
+			}
+		}
+	}
+}
+
+func (m *ResourceTrustsModule) getAPIGatewayPoliciesPerRegion(r string, wg *sync.WaitGroup, semaphore chan struct{}, dataReceiver chan Resource2) {
+	defer func() {
+		m.CommandCounter.Executing--
+		m.CommandCounter.Complete++
+		wg.Done()
+	}()
+	semaphore <- struct{}{}
+	defer func() { <-semaphore }()
+
+	restAPIs, err := sdk.CachedApiGatewayGetRestAPIs(*m.APIGatewayClient, aws.ToString(m.Caller.Account), r)
+	if err != nil {
+		sharedLogger.Error(err.Error())
+		return
+	}
+
+	for _, restAPI := range restAPIs {
+		var isPublic string
+		var statementSummaryInEnglish string
+		var isInteresting = "No"
+
+		if sdk.IsPublicApiGateway(&restAPI) {
+			isPublic = magenta("Yes")
+			isInteresting = magenta("Yes")
+		} else {
+			isPublic = "No"
+		}
+
+		if restAPI.Policy != nil && *restAPI.Policy != "" {
+
+			// remove backslashes from the policy JSON
+			policyJson := strings.ReplaceAll(aws.ToString(restAPI.Policy), `\"`, `"`)
+
+			restAPIPolicy, err := policy.ParseJSONPolicy([]byte(policyJson))
+			if err != nil {
+				sharedLogger.Error(fmt.Errorf("parsing policy (%s) as JSON: %s", aws.ToString(restAPI.Name), err))
+				m.CommandCounter.Error++
+				continue
+			}
+
+			if !restAPIPolicy.IsEmpty() {
+				for i, statement := range restAPIPolicy.Statement {
+					prefix := ""
+					if len(restAPIPolicy.Statement) > 1 {
+						prefix = fmt.Sprintf("Statement %d says: ", i)
+						statementSummaryInEnglish = prefix + statement.GetStatementSummaryInEnglish(*m.Caller.Account) + "\n"
+					} else {
+						statementSummaryInEnglish = statement.GetStatementSummaryInEnglish(*m.Caller.Account)
+					}
+
+					statementSummaryInEnglish = strings.TrimSuffix(statementSummaryInEnglish, "\n")
+					if isResourcePolicyInteresting(statementSummaryInEnglish) {
+						//magenta(statementSummaryInEnglish)
+						isInteresting = magenta("Yes")
+					}
+
+					dataReceiver <- Resource2{
+						AccountID:             aws.ToString(m.Caller.Account),
+						ARN:                   fmt.Sprintf("arn:aws:execute-api:%s:%s:%s/*", r, *m.Caller.Account, *restAPI.Id),
+						ResourcePolicySummary: statementSummaryInEnglish,
+						Public:                isPublic,
+						Name:                  aws.ToString(restAPI.Name),
+						Region:                r,
+						Interesting:           isInteresting,
+					}
+				}
+			}
+		} else {
+			dataReceiver <- Resource2{
+				AccountID:             aws.ToString(m.Caller.Account),
+				ARN:                   fmt.Sprintf("arn:aws:execute-api:%s:%s:%s/*", r, *m.Caller.Account, *restAPI.Id),
+				ResourcePolicySummary: statementSummaryInEnglish,
+				Public:                isPublic,
+				Name:                  aws.ToString(restAPI.Name),
+				Region:                r,
+				Interesting:           isInteresting,
 			}
 		}
 	}

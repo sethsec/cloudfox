@@ -46,6 +46,10 @@ func TestIsResourcePolicyInteresting(t *testing.T) {
 }
 
 func TestKMSResourceTrusts(t *testing.T) {
+
+	mockedKMSClient := &sdk.MockedKMSClient{}
+	var kmsClient sdk.KMSClientInterface = mockedKMSClient
+
 	testCases := []struct {
 		outputDirectory string
 		verbosity       int
@@ -56,8 +60,9 @@ func TestKMSResourceTrusts(t *testing.T) {
 			outputDirectory: ".",
 			verbosity:       2,
 			testModule: ResourceTrustsModule{
-				KMSClient:  &sdk.MockedKMSClient{},
-				AWSRegions: []string{"us-west-2"},
+				KMSClient:        &kmsClient,
+				APIGatewayClient: nil,
+				AWSRegions:       []string{"us-west-2"},
 				Caller: sts.GetCallerIdentityOutput{
 					Account: aws.String("123456789012"),
 					Arn:     aws.String("arn:aws:iam::123456789012:user/cloudfox_unit_tests"),
@@ -80,7 +85,62 @@ func TestKMSResourceTrusts(t *testing.T) {
 				t.Fatal("Resource name does not match expected value")
 			}
 			if expectedResource2.ARN != tc.testModule.Resources2[index].ARN {
-				t.Fatal("Resource ID does not match expected value")
+				t.Fatal("Resource ARN does not match expected value")
+			}
+		}
+	}
+}
+
+func TestAPIGatewayResourceTrusts(t *testing.T) {
+
+	mockedAPIGatewayClient := &sdk.MockedAWSAPIGatewayClient{}
+	var apiGatewayClient sdk.APIGatewayClientInterface = mockedAPIGatewayClient
+
+	testCases := []struct {
+		outputDirectory string
+		verbosity       int
+		testModule      ResourceTrustsModule
+		expectedResult  []Resource2
+	}{
+		{
+			outputDirectory: ".",
+			verbosity:       2,
+			testModule: ResourceTrustsModule{
+				KMSClient:        nil,
+				APIGatewayClient: &apiGatewayClient,
+				AWSRegions:       []string{"us-west-2"},
+				Caller: sts.GetCallerIdentityOutput{
+					Account: aws.String("123456789012"),
+					Arn:     aws.String("arn:aws:iam::123456789012:user/cloudfox_unit_tests"),
+				},
+				Goroutines: 30,
+			},
+			expectedResult: []Resource2{
+				{
+					Name:   "api1",
+					ARN:    "arn:aws:execute-api:us-west-2:123456789012:abcdefg/*",
+					Public: "No",
+				},
+				{
+					Name:   "api2",
+					ARN:    "arn:aws:execute-api:us-west-2:123456789012:qwerty/*",
+					Public: "Yes",
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc.testModule.PrintResources(tc.outputDirectory, tc.verbosity, false)
+		for index, expectedResource2 := range tc.expectedResult {
+			if expectedResource2.Name != tc.testModule.Resources2[index].Name {
+				t.Fatal("Resource name does not match expected value")
+			}
+			if expectedResource2.ARN != tc.testModule.Resources2[index].ARN {
+				t.Fatal("Resource ARN does not match expected value")
+			}
+			if expectedResource2.Public != tc.testModule.Resources2[index].Public {
+				t.Fatal("Resource Public does not match expected value")
 			}
 		}
 	}
