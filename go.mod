@@ -55,7 +55,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.56.3
 	github.com/aws/aws-sdk-go-v2/service/lightsail v1.40.3
 	github.com/aws/aws-sdk-go-v2/service/mq v1.25.3
-	github.com/aws/aws-sdk-go-v2/service/opensearch v1.39.2
+	github.com/aws/aws-sdk-go-v2/service/opensearch v1.46.1
 	github.com/aws/aws-sdk-go-v2/service/organizations v1.30.2
 	github.com/aws/aws-sdk-go-v2/service/ram v1.27.3
 	github.com/aws/aws-sdk-go-v2/service/rds v1.82.0

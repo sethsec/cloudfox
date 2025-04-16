@@ -203,3 +203,60 @@ func TestVpcEndpointResourceTrusts(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenSearchResourceTrusts(t *testing.T) {
+
+	mockedOpenSearchClient := &sdk.MockedOpenSearchClient{}
+	var openSearchClient sdk.OpenSearchClientInterface = mockedOpenSearchClient
+
+	testCases := []struct {
+		outputDirectory string
+		verbosity       int
+		testModule      ResourceTrustsModule
+		expectedResult  []Resource2
+	}{
+		{
+			outputDirectory: ".",
+			verbosity:       2,
+			testModule: ResourceTrustsModule{
+				KMSClient:        nil,
+				APIGatewayClient: nil,
+				EC2Client:        nil,
+				OpenSearchClient: &openSearchClient,
+				AWSRegions:       []string{"us-west-2"},
+				Caller: sts.GetCallerIdentityOutput{
+					Account: aws.String("123456789012"),
+					Arn:     aws.String("arn:aws:iam::123456789012:user/cloudfox_unit_tests"),
+				},
+				Goroutines: 30,
+			},
+			expectedResult: []Resource2{
+				{
+					Name:   "domain1",
+					ARN:    "arn:aws:es:us-east-1:123456789012:domain/domain1",
+					Public: "No",
+				},
+				{
+					Name:   "domain2",
+					ARN:    "arn:aws:es:us-east-1:123456789012:domain/domain2",
+					Public: "Yes",
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc.testModule.PrintResources(tc.outputDirectory, tc.verbosity, false)
+		for index, expectedResource2 := range tc.expectedResult {
+			if expectedResource2.Name != tc.testModule.Resources2[index].Name {
+				t.Fatal("Resource name does not match expected value")
+			}
+			if expectedResource2.ARN != tc.testModule.Resources2[index].ARN {
+				t.Fatal("Resource ARN does not match expected value")
+			}
+			if expectedResource2.Public != tc.testModule.Resources2[index].Public {
+				t.Fatal("Resource Public does not match expected value")
+			}
+		}
+	}
+}

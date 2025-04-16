@@ -22,6 +22,7 @@ type ResourceTrustsModule struct {
 	KMSClient        *sdk.KMSClientInterface
 	APIGatewayClient *sdk.APIGatewayClientInterface
 	EC2Client        *sdk.AWSEC2ClientInterface
+	OpenSearchClient *sdk.OpenSearchClientInterface
 
 	// General configuration data
 	Caller             sts.GetCallerIdentityOutput
@@ -78,10 +79,10 @@ func (m *ResourceTrustsModule) PrintResources(outputDirectory string, verbosity 
 	fmt.Printf("[%s][%s] Enumerating Resources with resource policies for account %s.\n", cyan(m.output.CallingModule), cyan(m.AWSProfileStub), aws.ToString(m.Caller.Account))
 	// if kms feature flag is enabled include kms in the supported services
 	if includeKms {
-		fmt.Printf("[%s][%s] Supported Services: APIGateway, CodeBuild, ECR, EFS, Glue, KMS, Lambda, SecretsManager, S3, SNS, SQS, VpcEndpoint\n",
+		fmt.Printf("[%s][%s] Supported Services: APIGateway, CodeBuild, ECR, EFS, Glue, KMS, Lambda, Opensearch, SecretsManager, S3, SNS, SQS, VpcEndpoint\n",
 			cyan(m.output.CallingModule), cyan(m.AWSProfileStub))
 	} else {
-		fmt.Printf("[%s][%s] Supported Services: APIGateway, CodeBuild, ECR, EFS, Glue, Lambda, SecretsManager, S3, SNS, "+
+		fmt.Printf("[%s][%s] Supported Services: APIGateway, CodeBuild, ECR, EFS, Glue, Lambda, Opensearch, SecretsManager, S3, SNS, "+
 			"SQS, VpcEndpoint (KMS requires --include-kms feature flag)\n",
 			cyan(m.output.CallingModule), cyan(m.AWSProfileStub))
 	}
@@ -321,6 +322,18 @@ func (m *ResourceTrustsModule) executeChecks(r string, wg *sync.WaitGroup, semap
 			m.getVPCEndpointPoliciesPerRegion(r, wg, semaphore, dataReceiver)
 		}
 	}
+
+	if m.OpenSearchClient != nil {
+		res, err = servicemap.IsServiceInRegion("es", r)
+		if err != nil {
+			m.modLog.Error(err)
+		}
+		if res {
+			m.CommandCounter.Total++
+			wg.Add(1)
+			m.getOpenSearchPoliciesPerRegion(r, wg, semaphore, dataReceiver)
+		}
+	}
 }
 
 func (m *ResourceTrustsModule) Receiver(receiver chan Resource2, receiverDone chan bool) {
@@ -356,7 +369,7 @@ func (m *ResourceTrustsModule) getSNSTopicsPerRegion(r string, wg *sync.WaitGrou
 
 	for _, t := range ListTopics {
 		var statementSummaryInEnglish string
-		var isInteresting string = "No"
+		var isInteresting = "No"
 		topic, err := cloudFoxSNSClient.getTopicWithAttributes(aws.ToString(t.TopicArn), r)
 		if err != nil {
 			m.modLog.Error(err.Error())
@@ -366,9 +379,10 @@ func (m *ResourceTrustsModule) getSNSTopicsPerRegion(r string, wg *sync.WaitGrou
 		parsedArn, err := arn.Parse(aws.ToString(t.TopicArn))
 		if err != nil {
 			topic.Name = aws.ToString(t.TopicArn)
+		} else {
+			topic.Name = parsedArn.Resource
+			topic.Region = parsedArn.Region
 		}
-		topic.Name = parsedArn.Resource
-		topic.Region = parsedArn.Region
 
 		// check if topic is public or not
 		if topic.Policy.IsPublic() {
@@ -1105,6 +1119,99 @@ func (m *ResourceTrustsModule) getVPCEndpointPoliciesPerRegion(r string, wg *syn
 				ResourcePolicySummary: statementSummaryInEnglish,
 				Public:                isPublic,
 				Name:                  aws.ToString(vpcEndpoint.VpcEndpointId),
+				Region:                r,
+				Interesting:           isInteresting,
+			}
+		}
+	}
+}
+
+func (m *ResourceTrustsModule) getOpenSearchPoliciesPerRegion(r string, wg *sync.WaitGroup, semaphore chan struct{}, dataReceiver chan Resource2) {
+	defer func() {
+		m.CommandCounter.Executing--
+		m.CommandCounter.Complete++
+		wg.Done()
+	}()
+	semaphore <- struct{}{}
+	defer func() { <-semaphore }()
+
+	openSearchDomains, err := sdk.CachedOpenSearchListDomainNames(*m.OpenSearchClient, aws.ToString(m.Caller.Account), r)
+	if err != nil {
+		sharedLogger.Error(err.Error())
+		return
+	}
+	for _, openSearchDomain := range openSearchDomains {
+		var isPublic string
+		var statementSummaryInEnglish string
+		var isInteresting = "No"
+
+		openSearchDomainConfig, err := sdk.CachedOpenSearchDescribeDomainConfig(*m.OpenSearchClient, aws.ToString(m.Caller.Account), r, aws.ToString(openSearchDomain.DomainName))
+		if err != nil {
+			sharedLogger.Error(err.Error())
+			m.CommandCounter.Error++
+			continue
+		}
+
+		if aws.ToBool(openSearchDomainConfig.AdvancedSecurityOptions.Options.Enabled) {
+			isPublic = "No"
+		} else {
+			isPublic = magenta("Yes")
+			isInteresting = magenta("Yes")
+		}
+
+		openSearchDomainStatus, err := sdk.CachedOpenSearchDescribeDomain(*m.OpenSearchClient, aws.ToString(m.Caller.Account), r, aws.ToString(openSearchDomain.DomainName))
+		if err != nil {
+			sharedLogger.Error(err.Error())
+			m.CommandCounter.Error++
+			continue
+		}
+
+		if openSearchDomainStatus.AccessPolicies != nil && *openSearchDomainStatus.AccessPolicies != "" {
+
+			// remove backslashes from the policy JSON
+			policyJson := strings.ReplaceAll(aws.ToString(openSearchDomainStatus.AccessPolicies), `\"`, `"`)
+
+			openSearchDomainPolicy, err := policy.ParseJSONPolicy([]byte(policyJson))
+			if err != nil {
+				sharedLogger.Error(fmt.Errorf("parsing policy (%s) as JSON: %s", aws.ToString(openSearchDomainStatus.ARN), err))
+				m.CommandCounter.Error++
+				continue
+			}
+
+			if !openSearchDomainPolicy.IsEmpty() {
+				for i, statement := range openSearchDomainPolicy.Statement {
+					prefix := ""
+					if len(openSearchDomainPolicy.Statement) > 1 {
+						prefix = fmt.Sprintf("Statement %d says: ", i)
+						statementSummaryInEnglish = prefix + statement.GetStatementSummaryInEnglish(*m.Caller.Account) + "\n"
+					} else {
+						statementSummaryInEnglish = statement.GetStatementSummaryInEnglish(*m.Caller.Account)
+					}
+
+					statementSummaryInEnglish = strings.TrimSuffix(statementSummaryInEnglish, "\n")
+					if isResourcePolicyInteresting(statementSummaryInEnglish) {
+						//magenta(statementSummaryInEnglish)
+						isInteresting = magenta("Yes")
+					}
+
+					dataReceiver <- Resource2{
+						AccountID:             aws.ToString(m.Caller.Account),
+						ARN:                   aws.ToString(openSearchDomainStatus.ARN),
+						ResourcePolicySummary: statementSummaryInEnglish,
+						Public:                isPublic,
+						Name:                  aws.ToString(openSearchDomain.DomainName),
+						Region:                r,
+						Interesting:           isInteresting,
+					}
+				}
+			}
+		} else {
+			dataReceiver <- Resource2{
+				AccountID:             aws.ToString(m.Caller.Account),
+				ARN:                   aws.ToString(openSearchDomainStatus.ARN),
+				ResourcePolicySummary: statementSummaryInEnglish,
+				Public:                isPublic,
+				Name:                  aws.ToString(openSearchDomain.DomainName),
 				Region:                r,
 				Interesting:           isInteresting,
 			}
